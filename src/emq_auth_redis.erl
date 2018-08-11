@@ -28,47 +28,58 @@
 
 -record(state, {auth_cmd, super_cmd, hash_type}).
 
+-define(EMPTY(Username), (Username =:= undefined orelse Username =:= <<>>)).
+
+-define(LOG(Level, Format, Args),
+    lager:Level("MQTT-SN(ASLEEP-TIMER): " ++ Format, Args)).
+
 init({AuthCmd, SuperCmd, HashType}) ->
     {ok, #state{auth_cmd = AuthCmd, super_cmd = SuperCmd, hash_type = HashType}}.
 
 check(#mqtt_client{username = Username}, Password, _State)
-    when ?UNDEFINED(Username); ?UNDEFINED(Password) ->
+    when ?UNDEFINED(Username) ->
     {error, username_or_password_undefined};
 
 check(Client, Password, #state{auth_cmd  = AuthCmd,
                                super_cmd = SuperCmd,
                                hash_type = HashType}) ->
-    Result = case emq_auth_redis_cli:q(AuthCmd, Client) of
+    Passwd = if ?EMPTY(Password) -> 
+             <<"">>;
+	     true ->
+             Password 
+      end,   
+   Result = case emq_auth_redis_cli:q(AuthCmd, Client) of
                 {ok, PassHash} when is_binary(PassHash) ->
-                    check_pass(PassHash, Password, HashType);  
+                    check_pass(PassHash, Passwd, HashType);  
                 {ok, [undefined|_]} ->
                     ignore;
                 {ok, [PassHash]} ->
-                    check_pass(PassHash, Password, HashType);
+                    check_pass(PassHash, Passwd, HashType);
                 {ok, [PassHash, Salt|_]} ->
-                    check_pass(PassHash, Salt, Password, HashType);
+                    check_pass(PassHash, Salt, Passwd, HashType);
                 {error, Reason} ->
                     {error, Reason}
              end,
-    case Result of ok -> {ok, is_superuser(SuperCmd, Client)}; Error -> Error end.
+    ?LOG(error,"result=~p",[Result]),
+	case Result of ok -> {ok, is_superuser(SuperCmd, Client)}; Error -> Error end.
 
-check_pass(PassHash, Password, HashType) ->
-    check_pass(PassHash, hash(HashType, Password)).
-check_pass(PassHash, Salt, Password, {pbkdf2, Macfun, Iterations, Dklen}) ->
-  check_pass(PassHash, hash(pbkdf2, {Salt, Password, Macfun, Iterations, Dklen}));
-check_pass(PassHash, Salt, Password, {salt, bcrypt}) ->
-    check_pass(PassHash, hash(bcrypt, {Salt, Password}));
-check_pass(PassHash, Salt, Password, {salt, HashType}) ->
-    check_pass(PassHash, hash(HashType, <<Salt/binary, Password/binary>>));
-check_pass(PassHash, Salt, Password, {HashType, salt}) ->
-    check_pass(PassHash, hash(HashType, <<Password/binary, Salt/binary>>)).
+check_pass(PassHash, Passwd, HashType) ->
+    check_pass(PassHash, hash(HashType, Passwd)).
+check_pass(PassHash, Salt, Passwd, {pbkdf2, Macfun, Iterations, Dklen}) ->
+  check_pass(PassHash, hash(pbkdf2, {Salt, Passwd, Macfun, Iterations, Dklen}));
+check_pass(PassHash, Salt, Passwd, {salt, bcrypt}) ->
+    check_pass(PassHash, hash(bcrypt, {Salt, Passwd}));
+check_pass(PassHash, Salt, Passwd, {salt, HashType}) ->
+    check_pass(PassHash, hash(HashType, <<Salt/binary, Passwd/binary>>));
+check_pass(PassHash, Salt, Passwd, {HashType, salt}) ->
+    check_pass(PassHash, hash(HashType, <<Passwd/binary, Salt/binary>>)).
 
 check_pass(PassHash, PassHash) -> ok;
 check_pass(_, _)               -> {error, password_error}.
 
 description() -> "Authentication with Redis".
 
-hash(Type, Password) -> emqttd_auth_mod:passwd_hash(Type, Password).
+hash(Type, Passwd) -> emqttd_auth_mod:passwd_hash(Type, Passwd).
 
 -spec(is_superuser(undefined | list(), mqtt_client()) -> boolean()).
 is_superuser(undefined, _Client) ->
